@@ -1,0 +1,57 @@
+{
+ "schema": 1,
+ "version": "2026-11-06.1",
+ "records_through": "2026-11-06",
+ "published": "2026-11-06T23:41:11Z",
+ "min_app_build": 1,
+ "files": {
+  "detail-badlands-southwest": {
+   "path": "detail-badlands-southwest-e8bf8bb07c55.json",
+   "sha256": "e8bf8bb07c55e0e83c97d118477872ce5868e273d48da37e4b81ce03ed01bb2a",
+   "bytes": 6688,
+   "rows": 111
+  },
+  "detail-bismarck-mandan": {
+   "path": "detail-bismarck-mandan-5ccd25702f9d.json",
+   "sha256": "5ccd25702f9df65414338532240bc4c26cb0df3aea0aec8a5649531aa3caed1c",
+   "bytes": 21409,
+   "rows": 332
+  },
+  "detail-lakes-southeast": {
+   "path": "detail-lakes-southeast-646449e6f410.json",
+   "sha256": "646449e6f4103685cf46e032c572b7606f2b4cf90a166cb8fe019f2dd5bc46c9",
+   "bytes": 10544,
+   "rows": 183
+  },
+  "detail-minot-north-central": {
+   "path": "detail-minot-north-central-c8b910cc0e02.json",
+   "sha256": "c8b910cc0e028f6da89d7de1f963f33697a6efb322755a8d6fccd4d42fcfc290",
+   "bytes": 15596,
+   "rows": 254
+  },
+  "detail-oil-patch-northwest": {
+   "path": "detail-oil-patch-northwest-280a8164c143.json",
+   "sha256": "280a8164c1430148e3fd1b2c46dc3a467b4860c64f2ab73bfb44d3122aa11bf1",
+   "bytes": 11202,
+   "rows": 182
+  },
+  "detail-red-river-valley": {
+   "path": "detail-red-river-valley-363303ccd172.json",
+   "sha256": "363303ccd1728950bb4bee77ea9de42df78f8cc21dc2626c2b256a416cb90afe",
+   "bytes": 49385,
+   "rows": 742
+  },
+  "places": {
+   "path": "places-ae475b816b3f.json",
+   "sha256": "ae475b816b3fde5f6f52bb225ff4b75307558f49c0f6431db5bda1faf7208b11",
+   "bytes": 294268,
+   "rows": 1837
+  }
+ },
+ "counts": {
+  "places": 1837,
+  "files": 7,
+  "bytes": 409092,
+  "restaurants": 1736
+ }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "North Dakota Eats",
+  "short_name": "ND Eats",
+  "description": "Knoephla, steaks & walleye: a guide to 1,736 North Dakota restaurants.",
+  "start_url": "/north-dakota-eats/",
+  "display": "browser",
+  "background_color": "#f7f2e6",
+  "theme_color": "#1e4f8c",
+  "icons": [
+    {
+      "src": "/north-dakota-eats/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/north-dakota-eats/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

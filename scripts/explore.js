@@ -1,0 +1,742 @@
+// North Dakota Eats web app: the iPhone app's guides, search, filters, map and place details, in the browser.
+// Keep its guide rules in step with NorthDakotaEats/Models/Guide.swift and its search with NorthDakotaEats/Models/Search.swift.
+// Same data as the app, split by scripts/make-site.py into data/core.json (list, search and map columns), data/ids.json (each place's
+// stable id, fetched at the first tap, key, scroll or hover, so a visit that only looks doesn't download it; saved places and #p= links
+// wait for it) and data/detail-<county>.json (phones, websites, notes, and county records or inspection results where a state has them), fetched per
+// county when a place there is opened. Every data file carries the version of the core.json it was built with (core.json "ver",
+// detail "_v", ids "v"): files from another build are fetched again, and never mixed in, because ids and details are keyed by row. No cookies, no trackers; saved places and the last guide live in this browser's localStorage only
+// (keys start with ndeats-: other state sites share the nickstrom5.github.io origin).
+// The page runs under a strict Content-Security-Policy (hash-pinned inline script and style): never add inline event handlers or
+// inline style attributes to the HTML built here; set properties from code instead.
+(() => {
+  "use strict";
+  const BASE = document.documentElement.dataset.base || "";
+  const $ = (s) => document.querySelector(s);
+  // every value that goes into innerHTML passes through esc(), numbers included (the data file is trusted, but not that much)
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const own = (o, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);   // Object.hasOwn, for older Safari too
+  const PREFIX = "ndeats-";
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(PREFIX + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(PREFIX + k, JSON.stringify(v)); } catch { /* private mode */ } },
+  };
+  // only http(s) links leave the page; bare hosts ("example.com/menu") get https://
+  const safeUrl = (u) => {
+    u = String(u ?? "").trim();
+    if (/^https?:\/\/[^\s"'<>\\]+$/i.test(u)) return u;
+    if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(?:[/?#][^\s"'<>\\]*)?$/i.test(u)) return "https://" + u;
+    return null;
+  };
+  const num = (x) => (x == null || x === "" || !Number.isFinite(Number(x)) ? null : Number(x));
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const fmtDate = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s ?? "")); return m ? `${MONTHS[+m[2] - 1]} ${+m[3]}, ${m[1]}` : String(s ?? ""); };
+  // NDHHS and eight local health units inspect; no result is shown, and each place links NDHHS's food and lodging page (never a grade of ours)
+  const NDHHS_URL = "https://www.hhs.nd.gov/health/food-and-lodging";
+
+  // ---------------------------------------------------------------- search (a port of NorthDakotaEats/Models/Search.swift)
+  // pikes are street types too, and "state st" is a street, not the state
+  const typeSyn = { avenue: "ave", av: "ave", street: "st", boulevard: "blvd", road: "rd", drive: "dr", place: "pl", court: "ct",
+    parkway: "pkwy", highway: "hwy", lane: "ln", trail: "trl", circle: "cir", terrace: "ter", pike: "pike", pk: "pike", pke: "pike" };
+  // directions and road names: "north main" finds "N Main St", "interstate 40" finds "I-40"
+  const syn = { ...typeSyn, north: "n", south: "s", east: "e", west: "w", northwest: "nw", northeast: "ne", southwest: "sw", southeast: "se",
+    saint: "st", mount: "mt", fort: "ft", interstate: "i", ih: "i", freeway: "fwy", expressway: "expy" };
+  const abbrs = new Set(Object.values(syn)), typeAbbrs = new Set(Object.values(typeSyn));
+  const DIRS = new Set(["n", "s", "e", "w", "ne", "nw", "se", "sw"]);
+  // the bit order is pipeline/northdakota.py's TAGS
+  const KNOEPHLA = 1, STEAKS = 2, OLDEST = 4;
+  // a dish ("banh mi", "cheesy western") is not a tag: it's in each hand-checked place's search text, so it finds the places serving it
+  const tagPhrases = [["knoephla soup", KNOEPHLA], ["knoephla", KNOEPHLA], ["knephla", KNOEPHLA], ["kuchen", KNOEPHLA],
+    ["steakhouses", STEAKS], ["steakhouse", STEAKS], ["walleye", STEAKS]];
+  // letters with no accent to strip (NFD keeps them): "pho tay do" must find Phở Tây Đô (Ohio's 2026-10-24 fix)
+  const UNACCENTED = { "ø": "o", "æ": "ae", "œ": "oe", "đ": "d", "ł": "l", "ß": "ss", "þ": "th", "ı": "i" };
+  function normalize(s) {
+    let t = String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[øæœđłßþı]/g, (c) => UNACCENTED[c]);
+    // initials keep together, so "jr crickets" finds J.R. Crickets (St. and E. Main St stay as they are)
+    t = t.replace(/\b([a-z])\.(?=[a-z]\b)/g, "$1");
+    t = t.replace(/\b([a-z0-9])\s*&\s*([a-z0-9])\b/g, "$1$2").replace(/&/g, " and ").replace(/['’`]/g, "");
+    return t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  }
+  const normAddr = (s) => normalize(s).split(" ").map((w) => (own(syn, w) ? syn[w] : w)).join(" ");
+
+  function parse(text) {
+    const q = { tokens: [], town: null, townPhrase: null, tag: 0, tagPhrase: null, tagStem: null, townNeedle: null, streetNeedle: null };
+    let raw = normalize(text).split(" ").filter(Boolean);
+    if (!raw.length) return q;
+    let mapped = raw.map((w) => (own(syn, w) ? syn[w] : w));
+    const find = (phrase) => {
+      const p = phrase.split(" ");
+      for (let i = 0; i + p.length <= mapped.length; i++) if (p.every((w, k) => mapped[i + k] === w)) return [i, i + p.length];
+      return null;
+    };
+    const cut = ([a, b]) => { const words = raw.slice(a, b).join(" "); raw.splice(a, b - a); mapped.splice(a, b - a); return words; };
+    for (const [phrase, tag] of tagPhrases) { const r = find(normalize(phrase)); if (r) { q.tag = tag; q.tagPhrase = cut(r); break; } }
+    if (q.tagPhrase) { const stem = normalize(q.tagPhrase).replace(/s$/, ""); q.tagStem = stem ? " " + stem : null; }
+    // the longest town named in the query wins, unless a street type follows it ("houston st" is a street)
+    for (const key of TOWN_KEYS_BY_LENGTH) {
+      const r = find(key);
+      if (r && !(r[1] < mapped.length && typeAbbrs.has(mapped[r[1]]))) {
+        // a direction word right before the town ("north shreveport") may mean the street as well as the town
+        if (r[0] > 0 && DIRS.has(mapped[r[0] - 1])) q.streetNeedle = " " + mapped.slice(r[0] - 1, r[1]).join(" ") + " ";
+        q.town = TOWN_KEYS[key]; q.townPhrase = cut(r); q.townNeedle = " " + normalize(q.townPhrase); break;
+      }
+    }
+    const stop = new Set(["the", "and", "of", "a", "in", "near", "me"]);   // "barbecue near me" isn't a place named "Me"
+    let idx = raw.map((_, i) => i);
+    // stop words stay only when they're all there is ("the"); next to a guide or a town ("lemon pepper near me") they go
+    if (q.tag || q.town || idx.some((i) => !stop.has(mapped[i]))) idx = idx.filter((i) => !stop.has(mapped[i]));
+    idx.forEach((i, n) => {
+      const token = raw[i], isLast = n === idx.length - 1;
+      if (own(syn, token)) { q.tokens.push([` ${syn[token]} `, ` ${token}`]); return; }
+      const whole = (abbrs.has(token) && (!isLast || token.length > 1)) || (token.length <= 2 && !isLast);
+      const needles = [" " + token + (whole ? " " : "")];
+      if (isLast && token.length >= 3) for (const [word, abbr] of Object.entries(typeSyn)) if (word !== token && word.startsWith(token)) needles.push(` ${abbr} `);
+      q.tokens.push(needles);
+    });
+    // "brady st": a finished street type sticks to the word before it
+    if (q.tokens.length >= 2 && idx.length && typeAbbrs.has(mapped[idx[idx.length - 1]])) {
+      const last = idx[idx.length - 1], prev = idx[idx.length - 2];
+      q.tokens.splice(-2, 2, [` ${mapped[prev]} ${mapped[last]} `, ` ${raw[prev]} ${raw[last]}`]);
+    }
+    return q;
+  }
+  const qEmpty = (q) => !q.tokens.length && !q.town && !q.tag;
+  function matches(p, q) {
+    if (q.tag && !(p.g & q.tag)) { if (!q.tagStem || !p.nameText.includes(q.tagStem)) return false; }
+    if (q.town && p.c !== q.town) {
+      if (!(q.townNeedle && p.nameText.includes(q.townNeedle)) && !(q.streetNeedle && p.search.includes(q.streetNeedle))) return false;
+    }
+    return q.tokens.every((needles) => needles.some((n) => p.search.includes(n)));
+  }
+  const nameMatches = (p, q) => q.tokens.length && q.tokens.every((needles) => needles.some((n) => p.nameText.includes(n)));
+
+  // ---------------------------------------------------------------- guides (NorthDakotaEats/Models/Guide.swift)
+  const hcTag = (t) => (p) => p.hc && Boolean(p.g & t);
+  const HC_SORTS = ["featured", "nearest", "name"];
+  const GUIDES = {
+    knoephla: { title: "Knoephla & Kuchen", sub: "Hand-checked knoephla soup, fleischkuechle and kuchen", inc: hcTag(KNOEPHLA), sorts: HC_SORTS },
+    steaks: { title: "Steaks & Walleye", sub: "Hand-checked steakhouses and walleye, Fargo to Medora", inc: hcTag(STEAKS), sorts: HC_SORTS },
+    honors: { title: "James Beard Honors", sub: "James Beard Award winners and semifinalists", inc: (p) => p.mi > 0 || p.jb, sorts: ["iconic", "nearest"] },
+    oldest: { title: "Oldest Places", sub: "Founding years checked at the same address, oldest first", inc: (p) => p.f != null && p.hc && Boolean(p.g & OLDEST), sorts: ["oldest"], ranked: true },
+    all: { title: "All Restaurants", sub: "Restaurants, cafés, bars and bakeries statewide", inc: () => true, sorts: ["name", "nearest"] },
+    saved: { title: "Saved", sub: "Places you saved in this browser", inc: (p) => saved.has(p.id), sorts: ["name", "nearest"] },
+  };
+  const HC_GUIDES = ["knoephla", "steaks"];
+  const SORT_LABEL = { featured: "Featured first", nearest: "Nearest", oldest: "Oldest first", name: "A to Z", iconic: "James Beard honors first" };
+  const MI = ["", "MICHELIN Recommended", "Bib Gourmand", "1 MICHELIN Star", "2 MICHELIN Stars", "3 MICHELIN Stars"];
+  const CHIP = [[KNOEPHLA, "Knoephla & kuchen"], [STEAKS, "Steaks & walleye"]];
+
+  // ---------------------------------------------------------------- state
+  let P = [], CAL = {}, TOWN_KEYS = {}, TOWN_KEYS_BY_LENGTH = [], GENERATED = "", META = {};
+  let here = null, shown = 100, current = [], view = "list";
+  const savedRaw = store.get("saved", []);
+  const saved = new Set(Array.isArray(savedRaw) ? savedRaw.filter((x) => typeof x === "string" && x.length < 64) : []);
+  const st = { g: "knoephla", q: "", sort: "", town: "", cuisine: "", chains: false, bib: false, p: "" };
+  let bibCount = 0;   // Bib Gourmand places (non-restaurants left out): the box shows only when there are some
+
+  const miles = (a, b) => {
+    const r = Math.PI / 180, dLa = (b.la - a.la) * r, dLo = (b.lo - a.lo) * r;
+    const h = Math.sin(dLa / 2) ** 2 + Math.cos(a.la * r) * Math.cos(b.la * r) * Math.sin(dLo / 2) ** 2;
+    return 3958.8 * 2 * Math.asin(Math.sqrt(h));
+  };
+  const milesText = (m) => (m < 10 ? m.toFixed(1) : Math.round(m)) + " mi";
+
+  function order() {
+    const g = GUIDES[st.g];
+    let o = st.sort && g.sorts.includes(st.sort) ? st.sort : HC_GUIDES.includes(st.g) && here ? "nearest" : g.sorts[0];
+    if (o === "nearest" && !here) o = g.sorts.find((s) => s !== "nearest") || o;   // no location yet: say what the list is really sorted by
+    return o;
+  }
+
+  function allows(p) {
+    if (st.town && p.c !== st.town) return false;
+    if (st.cuisine && p.cu !== st.cuisine) return false;
+    if (st.chains && p.ch >= 5) return false;
+    if (st.bib && p.mi !== 2) return false;      // MICHELIN Bib Gourmand only, as the app's Filters switch
+    return true;
+  }
+
+  function list() {
+    const g = GUIDES[st.g], q = parse(st.q), o = order();
+    if (qEmpty(q) && st.q.trim()) return [];   // typed something, but nothing searchable ("🍕", "!!!")
+    let out = P.filter((p) => g.inc(p) && allows(p) && (qEmpty(q) || matches(p, q)));
+    const byName = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i);
+    if (o === "nearest" && here) {
+      const dist = new Map(out.map((p) => [p, p.la != null ? miles(here, p) : Infinity]));
+      out.sort((a, b) => dist.get(a) - dist.get(b) || byName(a, b));
+    }
+    else if (o === "featured") out.sort((a, b) => (b.ip ?? -1) - (a.ip ?? -1) || (a.f ?? 9999) - (b.f ?? 9999) || byName(a, b));
+    else if (o === "oldest") out.sort((a, b) => (a.f ?? 9999) - (b.f ?? 9999) || byName(a, b));
+    else if (o === "iconic") {   // MICHELIN distinction, then the James Beard honor, then name (the app's order)
+      const jb = (p) => (p.h & 1 ? 4 : p.h & 2 ? 3 : p.h & 4 ? 2 : p.h & 8 ? 1 : 0);
+      out.sort((a, b) => (b.mi || 0) - (a.mi || 0) || jb(b) - jb(a) || byName(a, b));
+    }
+    else out.sort(byName);
+    if (q.tokens.length && !g.ranked) {       // name matches first when searching
+      const named = out.filter((p) => nameMatches(p, q));
+      if (named.length && named.length < out.length) { const ids = new Set(named); out = named.concat(out.filter((p) => !ids.has(p))); }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- rendering
+  const jbLabel = (p) => (p.h & 1 ? "America's Classic" : p.h & 2 ? "James Beard winner" : p.h & 4 ? "James Beard finalist" : p.h & 8 ? "James Beard semifinalist" : p.jb ? "James Beard (restaurateur)" : null);
+  function chips(p, max) {
+    const c = [];
+    if (p.mi && MI[p.mi]) c.push(`<span class="tag tag-mi">${esc(MI[p.mi])}</span>`);
+    const jb = jbLabel(p);
+    if (jb) c.push(`<span class="tag tag-jb">${esc(jb)}</span>`);
+    if (p.hc) for (const [t, label] of CHIP) if (p.g & t) c.push(`<span class="tag">${label}</span>`);
+    if (p.hc && p.g & OLDEST && p.f) c.push(`<span class="tag tag-plain">Since ${esc(p.f)}</span>`);
+    if (p.ch >= 5) c.push(`<span class="tag tag-plain">Chain · ${esc(p.ch)}</span>`);
+    if (p.t === 0 && !p.h && !p.mi && !p.hc) c.push('<span class="tag tag-dash">Listing only</span>');
+    return (max ? c.slice(0, max) : c).join("");
+  }
+
+  function metric(p, o) {
+    if (o === "nearest" && here && p.la != null) return [milesText(miles(here, p)), "away"];
+    if (p.f && st.g !== "all") return [String(p.f), "since"];
+    return null;
+  }
+
+  function render() {
+    const g = GUIDES[st.g], o = order();
+    if (st.g === "saved" && !idsReady) loadIds().then(() => { if (st.g === "saved") render(); });
+    current = list();
+    document.querySelectorAll(".ex-guides button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === st.g)));
+    $("#ex-sub").textContent = g.sub;
+    const sortSel = $("#ex-sort");
+    sortSel.innerHTML = g.sorts.map((s) => `<option value="${esc(s)}"${s === o ? " selected" : ""}>${esc(SORT_LABEL[s])}</option>`).join("");
+    sortSel.disabled = g.sorts.length < 2;
+    const filters = [st.town && `in ${st.town}`, st.cuisine && st.cuisine, st.chains && "no chains", st.bib && "Bib Gourmand"].filter(Boolean);
+    $("#ex-count").textContent = `${current.length.toLocaleString()} ${current.length === 1 ? "place" : "places"} · ${SORT_LABEL[o]}` + (filters.length ? ` · ${filters.join(", ")}` : "");
+    $("#ex-clear").hidden = !filters.length;
+    // Near me stays: each tap asks for a fresh fix (people move), and it's how to retry after a timeout
+    if (view === "list") renderList(o); else drawMap();
+    saveHash();
+  }
+
+  // typing searches only the open guide (the page opens on Lemon Pepper Wings): when that finds little, the same words across every
+  // restaurant, with the same filters, so a famous place outside the guide isn't a dead end
+  const FEW = 5;
+  function elsewhereCount() {
+    const q = parse(st.q);
+    if (st.g === "all" || qEmpty(q) || current.length >= FEW) return 0;
+    let n = 0;
+    for (const p of P) if (allows(p) && matches(p, q)) n++;
+    return n > current.length ? n : 0;
+  }
+  const allButton = (n) => `<button type="button" class="ex-small" id="ex-all">Search all restaurants (${esc(n.toLocaleString())} ${n === 1 ? "match" : "matches"})</button>`;
+  function wireAll() {
+    const b = $("#ex-all");
+    if (b) b.onclick = () => { st.g = "all"; st.sort = ""; shown = 100; render(); const r = $(".ex-row"); if (r) r.focus(); };
+  }
+
+  function renderList(o) {
+    const ol = $("#ex-list");
+    const g = GUIDES[st.g];
+    const elsewhere = elsewhereCount();
+    if (!current.length) {
+      ol.innerHTML = `<li class="ex-empty">${st.g === "saved" && !idsReady ? "Loading your saved places…" : st.g === "saved" && idsFailed && saved.size ? "Your saved places couldn't load: you may be offline, or the site was just updated. Reload the page to try again." : elsewhere ? `Nothing in ${esc(g.title)} matches that. ${allButton(elsewhere)}` : st.g === "saved" ? "Nothing saved yet. Open a place and tap Save to keep it here, in this browser." : "No places match. Try fewer words or clear the filters."}</li>`;
+      wireAll();
+      $("#ex-more").hidden = true;
+      return;
+    }
+    ol.innerHTML = current.slice(0, shown).map((p, i) => {
+      const m = metric(p, o);
+      const rank = g.ranked ? `<span class="ex-rank${i < 3 ? " top" : ""}" aria-label="Rank ${i + 1}">${i + 1}</span>` : "";
+      const where = [p.c, p.cu].filter(Boolean).join(" · ");
+      const big = m ? `<b>${esc(m[0])}</b>` : "";
+      return `<li><button class="ex-row" data-i="${esc(p.i)}">${rank}<span class="ex-main"><b>${esc(p.n)}</b><span class="ex-town">${esc(where)}</span><span class="ex-chips">${chips(p, 4)}</span></span>${m ? `<span class="ex-metric">${big}<small>${esc(m[1])}</small></span>` : ""}</button></li>`;
+    }).join("") + (elsewhere ? `<li class="ex-empty">Only ${esc(current.length)} in ${esc(g.title)}. ${allButton(elsewhere)}</li>` : "");
+    wireAll();
+    const left = current.length - shown;
+    $("#ex-more").hidden = left <= 0;
+    $("#ex-more").textContent = `Show more (${left.toLocaleString()} left)`;
+  }
+
+  // ---------------------------------------------------------------- place panel
+  const TIER = { 2: "On an official list", 1: "High-confidence listing", 0: "Listing only" };   // "High-confidence", not "confirmed" (Nick, 2026-10-13)
+
+  // North Dakota has no official list a script may read, so every place is a map listing or hand-checked research
+  function howWeKnow(p) {
+    const src = SOURCES[p.s] || "meta";
+    if (src === "research") return "On our hand-checked list (checked against a 2025 or 2026 source). The open map data didn't list it as a place to eat, so it's placed from its own map listing or street address.";
+    if (p.t === 2) return src === "official"
+      ? "From an official list. The open map data didn't have it, so it's placed on its listed street address."
+      : "Matched to an official list.";
+    return (p.t === 1 ? "A high-confidence listing in Overture's open map data." : "A single listing in Overture's open map data, so it may be closed or misfiled.")
+      + (p.hc ? " It's also on our hand-checked list, checked against a 2025 or 2026 source." : "");
+  }
+
+  const kv = (k, v) => (v == null || v === "" ? "" : `<div class="ex-kv"><span>${esc(k)}</span><b>${esc(v)}</b></div>`);
+  const section = (t, body) => `<section class="ex-sec"><h3>${esc(t)}</h3>${body}</section>`;
+  let listAtPush = null;   // the list's URL state when a place was opened with pushState (Back then closes the panel)
+
+  // the open place is a modal dialog at every width (a bottom sheet on phones, a side sheet on wider screens, which would otherwise
+  // cover Near me and the List/Map buttons): everything behind it is inert, and a click on the dimmed backdrop closes it
+  function panelMode() {
+    const panel = $("#ex-panel"), modal = !panel.hidden;
+    if (modal) { panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); }
+    else { panel.removeAttribute("role"); panel.removeAttribute("aria-modal"); }
+    $("#ex-backdrop").hidden = !modal;
+    const behind = [...document.querySelectorAll("body > .skip, .wrap > header, .wrap > nav, .wrap > footer, #main > *")].filter((el) => el !== panel && el.id !== "ex-backdrop");
+    behind.forEach((el) => { el.inert = modal; });
+  }
+
+  // no inspection result is shown in North Dakota; every place links NDHHS's food and lodging page (never a grade of ours)
+  const inspectionSection = (d) => section("Health inspections",
+    `<p class="ex-fine">North Dakota's Department of Health and Human Services and eight local health units inspect the state's restaurants, and places on tribal lands are under tribal jurisdiction. This site shows no inspection result and computes no grade.</p><p><a href="${NDHHS_URL}" rel="noopener" target="_blank">Who inspects where (NDHHS)</a></p>`);
+
+  function openPlace(p, push = true) {
+    const panel = $("#ex-panel");
+    const wasOpen = !panel.hidden;
+    // the place opens at once; its id (for Save, the #p= link and the Back step) follows when ids.json arrives, which the first tap
+    // only starts, so a tap never waits on it. If ids.json can't load (offline, or a build changed under us), the place stays open
+    // without Save and without a link.
+    const waiting = p.id == null && !idsReady;
+    if (waiting && (push || !wasOpen)) loadIds().then(() => { if (!panel.hidden && panel.dataset.i === String(p.i)) openPlace(p, push); });
+    const noId = p.id == null, pid = p.id ?? "";
+    // a re-render (the county's details just arrived) replaces the panel's buttons: remember where keyboard focus was, to put it back
+    const focused = wasOpen && panel.contains(document.activeElement) ? document.activeElement : null;
+    const refocus = focused && (focused.id ? `#${focused.id}` : focused.textContent.trim());
+    st.p = pid;
+    const loaded = DETAIL_LOADED.has(p.co), failed = DETAIL_FAILED.has(p.co);
+    const d = DETAIL.get(p.i) || {};
+    const la = num(p.la), lo = num(p.lo);
+    const addr = [p.a, [p.c, p.z].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+    const apple = la != null && lo != null
+      ? `https://maps.apple.com/?q=${encodeURIComponent(p.n)}&ll=${la},${lo}`
+      : `https://maps.apple.com/?q=${encodeURIComponent(p.n + ", " + addr)}`;
+    const dirs = la != null && lo != null ? `https://maps.apple.com/?daddr=${la},${lo}&dirflg=d` : apple;
+    const site = safeUrl(d.w);
+    const tel = d.ph ? String(d.ph).replace(/[^\d+]/g, "") : "";
+    let html = `<button class="ex-close" id="ex-close" aria-label="Close">×</button>
+      <p class="ex-kicker">${esc([p.c || "North Dakota", p.county && p.county !== "North Dakota" ? p.county : ""].filter(Boolean).join(" · ").toUpperCase())}</p>
+      <h2 id="ex-pname">${esc(p.n)}</h2>
+      <p class="ex-addr">${esc([addr, p.cu].filter(Boolean).join(" · "))}</p>
+      ${here && la != null ? `<p class="ex-dist">${esc(milesText(miles(here, p)))} away</p>` : ""}
+      <p class="ex-chips">${chips(p)}</p>
+      <div class="ex-actions">
+        <a class="btn ex-apple" href="${esc(apple)}" rel="noopener" target="_blank">Ratings, hours &amp; photos · Apple Maps</a>
+        <div class="ex-act-row">
+          <a href="${esc(dirs)}" rel="noopener" target="_blank">Directions</a>
+          ${tel ? `<a href="tel:${esc(tel)}">Call</a>` : ""}
+          ${site ? `<a href="${esc(site)}" rel="noopener nofollow" target="_blank">Website</a>` : ""}
+          ${waiting ? '<button id="ex-save" aria-pressed="false" disabled>Save</button>' : noId ? "" : `<button id="ex-save" aria-pressed="${saved.has(pid)}">${saved.has(pid) ? "Saved" : "Save"}</button>`}
+        </div>
+      </div>`;
+    if (!loaded) html += `<p class="ex-fine">Loading details…</p>`;
+    if (p.hc && (d.note || p.dish || p.f || d.seas)) {
+      html += section("Hand-checked", (d.note ? `<p>${esc(d.note)}</p>` : "") + kv("On the menu", p.dish ? String(p.dish).split("; ").join(", ") : "")
+        + kv("Open here since", p.f) + (d.fn ? `<p class="ex-fine">${esc(d.fn)}</p>` : "") + kv("Season", d.seas)
+        + `<p class="ex-fine">Checked against a 2025 or 2026 source: a dated magazine or news story or a visitor bureau's own page. Menus and hours change, so check before you go.</p>`);
+    }
+    if (p.mi || d.jbf) {
+      const lines = [...(p.mi && MI[p.mi] ? [MI[p.mi]] : []),
+        ...(d.jbf ? String(d.jbf).split("; ").map((x) => "James Beard: " + x) : [])];
+      html += section("Honors", `<ul>${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul><p class="ex-fine">Honors are facts, not ratings. James Beard Foundation and James Beard Award are trademarks of the James Beard Foundation.</p>`);
+    }
+    if (failed) html += `<p class="ex-fine">This place's details (county records, phone, website) didn't load: you may be offline, or the site was just updated. Reload the page to try again.</p>`;
+    else if (loaded) {
+      const lic = Array.isArray(d.lic) ? d.lic.filter(Array.isArray) : [];
+      html += section("Official records", (lic.length ? lic.map((l) => kv(String(l[0] || "Record"), [l[2], l[1] ? "No. " + l[1] : ""].filter(Boolean).join(" · ") || "On the list")).join("")
+          : kv("License record", "—"))
+        + kv("Serves alcohol", p.lq ? "Licensed to serve on the premises" : "—")
+        + `<p class="ex-fine">North Dakota publishes no open list of its restaurants or liquor licenses this site may read (the Attorney General's licensee list is a PDF that mixes on- and off-sale licenses), so this site shows no license and no alcohol status: — means unknown, never "no".</p>`);
+    }
+    html += loaded ? inspectionSection(d) : "";
+    html += section("How we know it's here", kv("Listed as", TIER[p.t])
+      + (p.ch >= 2 ? kv("Locations in North Dakota", p.ch.toLocaleString()) : "") + `<p class="ex-fine">${esc(howWeKnow(p))}</p>`);
+    const store_url = safeUrl(window.APP_STORE_URL);   // set in the page footer script once the App Store listing exists
+    html += store_url
+      ? `<p class="ex-app">Save it on your phone: <a href="${esc(store_url)}" rel="noopener">get the free iPhone app</a></p>`
+      : `<p class="ex-app">The iPhone app is coming soon. <a href="${BASE}/#download">Ask for early access</a></p>`;
+    panel.innerHTML = html;
+    panel.dataset.id = pid;
+    panel.dataset.i = String(p.i);
+    panel.hidden = false;
+    document.body.classList.add("ex-open");
+    panelMode();
+    $("#ex-close").onclick = () => closePlace();
+    if (!noId) $("#ex-save").onclick = (e) => {
+      if (saved.has(p.id)) saved.delete(p.id); else saved.add(p.id);
+      store.set("saved", [...saved]);
+      e.target.textContent = saved.has(p.id) ? "Saved" : "Save";
+      e.target.setAttribute("aria-pressed", String(saved.has(p.id)));
+      if (st.g === "saved") render();
+    };
+    const samePlace = wasOpen && panel.dataset.shown === String(p.i);   // a re-render: details or the id just arrived
+    if (!samePlace) panel.scrollTop = 0;
+    panel.dataset.shown = String(p.i);
+    if (!samePlace) $("#ex-close").focus();
+    else if (refocus) {
+      const same = refocus.startsWith("#") ? panel.querySelector(refocus)
+        : [...panel.querySelectorAll("a, button")].find((el) => el.textContent.trim() === refocus);
+      (same || $("#ex-close")).focus();
+    }
+    if (push && !noId) {
+      if (panel.dataset.pushed) saveHash();   // one Back step per panel, not per place looked at
+      else { listAtPush = listHash(); saveHash(true); panel.dataset.pushed = "1"; }
+    }
+    if (!loaded) loadDetail(p.co).then(() => { if (panel.dataset.i === String(p.i) && !panel.hidden) openPlace(p, false); });
+  }
+
+  // fromHistory: the Back button (or a hash link) already moved the URL, so don't touch history again
+  function closePlace(fromHistory = false) {
+    st.p = "";
+    const panel = $("#ex-panel");
+    const wasI = panel.dataset.i;   // the row the panel belonged to: focus goes back there
+    panel.hidden = true;
+    delete panel.dataset.id;
+    delete panel.dataset.i;
+    delete panel.dataset.shown;
+    delete panel.dataset.pushed;
+    document.body.classList.remove("ex-open");
+    panelMode();
+    if (!fromHistory) {
+      // the list hasn't changed since the panel opened: step back over the entry openPlace pushed, so Back isn't a dead click
+      if (history.state && history.state.ndeats === "place" && listHash() === listAtPush) history.back();
+      else saveHash();
+    }
+    listAtPush = null;
+    const row = wasI && document.querySelector(`.ex-row[data-i="${Number(wasI)}"]`);
+    if (row) row.focus();
+  }
+
+  // ---------------------------------------------------------------- map (canvas: county outlines + a dot per place)
+  let SHAPES = null, cam = null;
+  // North Dakota's own frame (set per state: a port's leftover numbers once framed the wrong state, QA 2026-11-03)
+  const LAT0 = 47.47, KX = Math.cos(LAT0 * Math.PI / 180);
+  const proj = (lo, la) => [(lo - (-100.30)) * KX, -(la - LAT0)];
+
+  function fitCam(w, h) {
+    const [x0, y0] = proj(-104.05, 49.00), [x1, y1] = proj(-96.55, 45.93);   // the state's west/north and east/south edges
+    const k = Math.min(w / (x1 - x0), h / (y1 - y0)) * 0.95;
+    return { k, x: (w - (x1 - x0) * k) / 2 - x0 * k, y: (h - (y1 - y0) * k) / 2 - y0 * k };
+  }
+
+  // calls f on every ring, however deeply it's nested (the state is [polygon[ring[point]]], each county [ring[point]])
+  const eachRing = (g, f) => {
+    if (!Array.isArray(g) || !g.length) return;
+    if (Array.isArray(g[0]) && typeof g[0][0] === "number") f(g); else g.forEach((x) => eachRing(x, f));
+  };
+
+  const classic = (p) => Boolean((p.hc && p.g) || p.mi);
+  async function drawMap() {
+    const cv = $("#ex-map"), wrap = $("#ex-mapwrap");
+    const w = wrap.clientWidth, h = wrap.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    if (!cam) cam = fitCam(w, h);
+    if (!SHAPES) SHAPES = await fetchJSON(`${BASE}/data/nd_shapes.json`).catch(() => ({ state: [], counties: [] }));
+    const c = cv.getContext("2d");
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+    const X = (lo, la) => { const [x, y] = proj(lo, la); return [x * cam.k + cam.x, y * cam.k + cam.y]; };
+    const ring = (r) => { r.forEach(([lo, la], i) => { const [x, y] = X(lo, la); i ? c.lineTo(x, y) : c.moveTo(x, y); }); c.closePath(); };
+    c.fillStyle = "#f7f3ec";   // the map stays light in dark mode (its frame is light too), so the navy dots keep their contrast
+    c.beginPath(); eachRing(SHAPES.state, ring); c.fill("evenodd");
+    c.strokeStyle = "rgba(14,26,48,.22)"; c.lineWidth = 0.8;
+    for (const co of SHAPES.counties || []) { c.beginPath(); eachRing(co.c, ring); c.stroke(); }
+    const pts = current.filter((p) => p.la != null);
+    const r = Math.max(2.2, Math.min(5, 1.6 + cam.k / 120));
+    // plain places: one batch of small squares (tens of thousands draw fast that way); hand-checked and honored places: dots on top
+    c.fillStyle = "#1f3a5f";
+    const sq = pts.length > 3000 ? Math.max(1.6, r - 0.6) : r * 1.6;
+    for (const p of pts) {
+      if (classic(p)) continue;
+      const [x, y] = X(p.lo, p.la);
+      if (x < -5 || y < -5 || x > w + 5 || y > h + 5) continue;
+      if (pts.length > 3000) c.fillRect(x - sq / 2, y - sq / 2, sq, sq);
+      else { c.beginPath(); c.arc(x, y, r, 0, 6.2832); c.fill(); }
+    }
+    c.fillStyle = "#b0172b"; c.strokeStyle = "#ffffff"; c.lineWidth = 1;
+    for (const p of pts) {
+      if (!classic(p)) continue;
+      const [x, y] = X(p.lo, p.la);
+      if (x < -5 || y < -5 || x > w + 5 || y > h + 5) continue;
+      c.beginPath(); c.arc(x, y, r + 1, 0, 6.2832); c.fill(); c.stroke();
+    }
+    $("#ex-maphint").textContent = pts.length ? `${pts.length.toLocaleString()} ${pts.length === 1 ? "place" : "places"} · tap a dot` : "No places to show";
+  }
+
+  function nearestDot(px, py) {
+    let best = null, bd = 14 * 14;
+    for (const p of current) {
+      if (p.la == null) continue;
+      const [x0, y0] = proj(p.lo, p.la), x = x0 * cam.k + cam.x, y = y0 * cam.k + cam.y;
+      const d = (x - px) ** 2 + (y - py) ** 2;
+      if (d < bd || (d === bd && classic(p))) { bd = d; best = p; }
+    }
+    return best;
+  }
+
+  function zoomAt(f, px, py) {
+    const k = Math.min(Math.max(cam.k * f, 40), 60000);
+    const s = k / cam.k;
+    cam = { k, x: px - (px - cam.x) * s, y: py - (py - cam.y) * s };
+    drawMap();
+  }
+
+  function mapEvents() {
+    const cv = $("#ex-map");
+    const ptrs = new Map();
+    let moved = false, pinch0 = null;
+    cv.addEventListener("wheel", (e) => { e.preventDefault(); const b = cv.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.25 : 0.8, e.clientX - b.left, e.clientY - b.top); }, { passive: false });
+    cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); moved = false; pinch0 = null; });
+    cv.addEventListener("pointermove", (e) => {
+      if (!ptrs.has(e.pointerId)) return;
+      const prev = ptrs.get(e.pointerId);
+      ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+      if (ptrs.size === 2) {
+        const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        const r = cv.getBoundingClientRect();
+        if (pinch0) zoomAt(d / pinch0, (a[0] + b[0]) / 2 - r.left, (a[1] + b[1]) / 2 - r.top);
+        pinch0 = d; moved = true; return;
+      }
+      const dx = e.clientX - prev[0], dy = e.clientY - prev[1];
+      if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+      cam.x += dx; cam.y += dy; drawMap();
+    });
+    const up = (e) => {
+      ptrs.delete(e.pointerId);
+      if (!moved && ptrs.size === 0) {
+        const b = cv.getBoundingClientRect(), p = nearestDot(e.clientX - b.left, e.clientY - b.top);
+        if (p) openPlace(p);
+      }
+      if (ptrs.size < 2) pinch0 = null;
+    };
+    cv.addEventListener("pointerup", up);
+    cv.addEventListener("pointercancel", (e) => ptrs.delete(e.pointerId));
+    $("#ex-zin").onclick = () => zoomAt(1.6, cv.clientWidth / 2, cv.clientHeight / 2);
+    $("#ex-zout").onclick = () => zoomAt(0.625, cv.clientWidth / 2, cv.clientHeight / 2);
+    window.addEventListener("resize", () => { if (view === "map") drawMap(); });
+  }
+
+  function centerOn(pt) {
+    const cv = $("#ex-map"), w = cv.clientWidth, h = cv.clientHeight;
+    const k = 4000, [x, y] = proj(pt.lo, pt.la);
+    cam = { k, x: w / 2 - x * k, y: h / 2 - y * k };
+  }
+
+  // ---------------------------------------------------------------- data, URL state, controls
+  let SOURCES = [], DETAIL_FILES = [];
+  async function fetchJSON(url, opts) { const r = await fetch(url, opts); if (!r.ok) throw new Error(r.status + " " + url); return r.json(); }
+  // the build this page's data comes from: the page names it (so a cached core.json from an older build isn't used), core.json confirms it
+  const PAGE_VER = ($("#ex-app") && $("#ex-app").dataset.ver) || "";
+  let DV = "";
+  const vq = (v) => (v ? "?v=" + encodeURIComponent(v) : "");
+  // a data file from another build (a cache that outlived a deploy) is fetched once more, then refused: its rows wouldn't line up
+  async function fetchCurrent(url, verOf) {
+    let d = await fetchJSON(url + vq(DV));
+    if (DV && verOf(d) !== DV) d = await fetchJSON(url + vq(DV), { cache: "reload" });
+    if (DV && verOf(d) !== DV) throw new Error("another build: " + url);
+    return d;
+  }
+  const DETAIL = new Map(), DETAIL_LOADED = new Set(), DETAIL_FAILED = new Set(), detailPromises = new Map();
+  // a county's detail file (phones, websites, notes, alcohol licenses) is fetched only once someone reaches for a place there
+  function loadDetail(co) {
+    // a county with no extras has no file (null in dfiles): nothing to fetch
+    if (!Number.isInteger(co) || co < 0 || co >= DETAIL_FILES.length || !DETAIL_FILES[co]) { DETAIL_LOADED.add(co); return Promise.resolve(); }
+    if (!detailPromises.has(co)) {
+      detailPromises.set(co, fetchCurrent(`${BASE}/data/detail-${encodeURIComponent(DETAIL_FILES[co])}.json`, (d) => d && d._v).then((d) => {
+        if (d && typeof d === "object") for (const k of Object.keys(d)) { const i = Number(k); if (Number.isInteger(i) && d[k] && typeof d[k] === "object") DETAIL.set(i, d[k]); }
+      }).catch(() => { DETAIL_FAILED.add(co); /* offline or another build: the panel says so, and asks for a reload */ })
+        .finally(() => DETAIL_LOADED.add(co)));
+    }
+    return detailPromises.get(co);
+  }
+
+  // ids.json: one stable id per place, in core order (saved places, #p= links and the panel's history entry use them)
+  let idsPromise = null, idsReady = false, idsFailed = false;
+  function loadIds() {
+    idsPromise ||= fetchCurrent(`${BASE}/data/ids.json`, (d) => d && d.v).then((d) => {
+      const ids = d && typeof d.ids === "string" ? d.ids.split(",") : [];   // one comma-separated string: smaller than a JSON array
+      if (ids.length !== P.length) throw new Error("ids.json doesn't match core.json");
+      ids.forEach((x, i) => { P[i].id = x; });
+    }).catch(() => { idsFailed = true; /* offline or another build: saving and links wait for a reload, and the page says so */ })
+      .finally(() => { idsReady = true; });
+    return idsPromise;
+  }
+
+  async function load() {
+    let d = await fetchJSON(`${BASE}/data/core.json${vq(PAGE_VER)}`);
+    // a core.json with no version predates versioning (a cache that ignored ?v=): its rows would meet this build's ids and county
+    // files unchecked, so fetch it once more past the cache, then stop with the reload message rather than mix two builds
+    if (PAGE_VER && typeof d.ver !== "string") d = await fetchJSON(`${BASE}/data/core.json${vq(PAGE_VER)}`, { cache: "reload" });
+    if (PAGE_VER && typeof d.ver !== "string") throw new Error("core.json from before versioning");
+    DV = typeof d.ver === "string" ? d.ver : "";
+    GENERATED = d.generated; CAL = d.calibration || {}; SOURCES = d.srcs || []; DETAIL_FILES = d.dfiles || [];
+    META = { permits: d.permits_updated };
+    const n = d.n, towns = new Map(), C = { ...d.cols };
+    for (const [k, pairs] of Object.entries(d.sparse || {})) {   // mostly-empty columns arrive as [[index, value], ...]
+      const col = new Array(n).fill(null);
+      if (Array.isArray(pairs)) for (const pr of pairs) if (Array.isArray(pr) && Number.isInteger(pr[0]) && pr[0] >= 0 && pr[0] < n) col[pr[0]] = pr[1];
+      C[k] = col;
+    }
+    for (const k of ["n", "c", "co", "cu", "t", "s", "a", "z", "b", "ch", "g", "hc", "ip", "f", "h", "mi", "dish", "lq", "dla", "dlo", "jb"])
+      if (!Array.isArray(C[k]) || C[k].length !== n) C[k] = new Array(n).fill(null);
+    P = new Array(n);
+    let la = 0, lo = 0;   // coordinates come as steps of 0.0001° from the previous place
+    for (let i = 0; i < n; i++) {
+      let pla = null, plo = null;
+      if (C.dla[i] != null && C.dlo[i] != null) { la += C.dla[i]; lo += C.dlo[i]; pla = la / 10000; plo = lo / 10000; }
+      const city = C.c[i] == null ? null : d.cities[C.c[i]], cu = d.cuisines[C.cu[i]], brand = C.b[i] == null ? null : d.brands[C.b[i]];
+      const county = C.co[i] == null ? null : d.counties[C.co[i]];
+      const p = { i, id: null, n: String(C.n[i] ?? ""), c: city, cu, t: C.t[i], s: C.s[i], a: C.a[i], z: C.z[i], la: pla, lo: plo,
+        ch: num(C.ch[i]) || 1, g: C.g[i] || 0, hc: C.hc[i] === 1, ip: C.ip[i], f: num(C.f[i]), h: C.h[i] || 0,
+        mi: num(C.mi[i]) || 0, jb: C.jb[i] === 1, dish: C.dish[i], co: C.co[i], county, lq: C.lq[i] === 1 };
+      p.search = " " + normalize([p.n, city, county, p.z, cu, brand, p.dish].filter(Boolean).join(" ")) + " " + normAddr(p.a || "") + " ";
+      p.nameText = " " + normalize([p.n, brand].filter(Boolean).join(" ")) + " ";
+      p.key = normalize(p.n);
+      P[i] = p;
+      if (city) towns.set(city, (towns.get(city) || 0) + 1);
+    }
+    const byCount = [...towns.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [name] of byCount) { const k = normAddr(name); if (!own(TOWN_KEYS, k)) TOWN_KEYS[k] = name; }   // biggest town wins a shared spelling
+    TOWN_KEYS_BY_LENGTH = Object.keys(TOWN_KEYS).sort((a, b) => b.length - a.length);
+    $("#ex-town").innerHTML = '<option value="">All towns</option>' + [...towns.keys()].sort((a, b) => a.localeCompare(b)).map((t) => `<option>${esc(t)}</option>`).join("");
+    const cuis = new Map();
+    for (const p of P) cuis.set(p.cu, (cuis.get(p.cu) || 0) + 1);
+    $("#ex-cuisine").innerHTML = '<option value="">All kinds</option>' + [...cuis.entries()].sort((a, b) => b[1] - a[1]).map(([c, k]) => `<option value="${esc(c)}">${esc(c)} (${esc(k.toLocaleString())})</option>`).join("");
+    bibCount = P.filter((p) => !p.v && p.mi === 2).length;
+    $("#ex-bibwrap").hidden = !bibCount;
+    $("#ex-bibn").textContent = `(${bibCount.toLocaleString()})`;
+    if (!bibCount) st.bib = false;
+  }
+
+  const guideOk = (g) => own(GUIDES, g);
+  function readHash() {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const last = store.get("guide", "knoephla");
+    // a returning visitor gets the guide they used last, unless it's an empty Saved list
+    st.g = guideOk(h.get("g")) ? h.get("g") : guideOk(last) && !(last === "saved" && !saved.size) ? last : "knoephla";
+    st.q = h.get("q") || ""; st.town = h.get("town") || ""; st.cuisine = h.get("kind") || ""; st.chains = h.get("chains") === "1"; st.bib = h.get("bib") === "1";
+    st.sort = h.get("sort") || ""; st.p = h.get("p") || "";
+  }
+  function hashOf(withPlace) {
+    const h = new URLSearchParams();
+    h.set("g", st.g);
+    if (st.q) h.set("q", st.q); if (st.town) h.set("town", st.town); if (st.cuisine) h.set("kind", st.cuisine);
+    if (st.chains) h.set("chains", "1"); if (st.bib) h.set("bib", "1"); if (st.sort) h.set("sort", st.sort); if (withPlace && st.p) h.set("p", st.p);
+    return "#" + h.toString();
+  }
+  const listHash = () => hashOf(false);
+  // filter changes replace the current history entry; opening a place pushes one, so Back closes the panel
+  function saveHash(push = false) {
+    const url = hashOf(true);
+    if (push) history.pushState({ ndeats: "place" }, "", url);
+    else history.replaceState(st.p ? { ndeats: "place" } : null, "", url);
+    store.set("guide", st.g);
+  }
+
+  // a coarse North Dakota outline (NorthDakotaEats/Services/LocationService.swift's NorthDakotaOutline): a bounding box would count the neighbours' border towns
+  const ND_RINGS = [[[-104.0456,45.9453],[-104.0453,47.3435],[-104.0417,47.8623],[-104.0481,48.5],[-104.0487,48.9999],[-97.2288,49.0005],[-97.2343,48.9967],[-97.2283,48.9948],[-97.2282,48.9921],[-97.2384,48.9826],[-97.2389,48.9666],[-97.2276,48.9622],[-97.2338,48.9473],[-97.2266,48.9458],[-97.2249,48.9339],[-97.2147,48.9319],[-97.2199,48.9221],[-97.2112,48.9166],[-97.2107,48.9047],[-97.1904,48.8961],[-97.1922,48.8916],[-97.2015,48.8919],[-97.1973,48.8878],[-97.1992,48.8806],[-97.1778,48.8754],[-97.1905,48.8647],[-97.1791,48.8628],[-97.1789,48.8569],[-97.1731,48.8504],[-97.1828,48.8466],[-97.1759,48.8449],[-97.1737,48.8394],[-97.1848,48.8324],[-97.1788,48.8267],[-97.1782,48.822],[-97.1901,48.8147],[-97.1586,48.8109],[-97.1588,48.8064],[-97.179,48.8011],[-97.1812,48.7978],[-97.169,48.8015],[-97.1623,48.8],[-97.1629,48.7964],[-97.1743,48.7943],[-97.1581,48.7912],[-97.1589,48.7833],[-97.1481,48.7818],[-97.1484,48.7793],[-97.1591,48.7751],[-97.1526,48.7726],[-97.1453,48.764],[-97.1545,48.7582],[-97.1526,48.7522],[-97.1369,48.7486],[-97.1368,48.7421],[-97.1422,48.7362],[-97.1283,48.7324],[-97.1374,48.7265],[-97.1264,48.7211],[-97.1187,48.7112],[-97.1099,48.7077],[-97.1208,48.7033],[-97.1105,48.6923],[-97.0903,48.6845],[-97.1011,48.6824],[-97.1004,48.6689],[-97.1091,48.6645],[-97.0987,48.6605],[-97.1079,48.6479],[-97.1158,48.6446],[-97.1096,48.6378],[-97.1125,48.6306],[-97.1251,48.6341],[-97.1308,48.6322],[-97.1307,48.629],[-97.1189,48.619],[-97.135,48.6224],[-97.1294,48.6137],[-97.1441,48.6148],[-97.1507,48.6115],[-97.1472,48.6081],[-97.1342,48.6071],[-97.1431,48.5986],[-97.1538,48.5949],[-97.1421,48.5926],[-97.1437,48.5824],[-97.1604,48.5813],[-97.159,48.5783],[-97.1492,48.5769],[-97.1493,48.5699],[-97.1754,48.5624],[-97.1655,48.5571],[-97.1394,48.5556],[-97.138,48.5532],[-97.1409,48.5513],[-97.1558,48.5511],[-97.163,48.5542],[-97.1663,48.5498],[-97.1606,48.5416],[-97.1438,48.5372],[-97.1414,48.5333],[-97.1525,48.5306],[-97.1549,48.527],[-97.1534,48.5209],[-97.146,48.5186],[-97.1333,48.523],[-97.127,48.5204],[-97.1359,48.5124],[-97.1501,48.5121],[-97.1494,48.501],[-97.1332,48.493],[-97.1317,48.4887],[-97.135,48.4876],[-97.143,48.4922],[-97.14,48.4847],[-97.1626,48.4785],[-97.1562,48.4749],[-97.1385,48.4776],[-97.128,48.4743],[-97.131,48.4711],[-97.1413,48.4746],[-97.1476,48.472],[-97.1429,48.4635],[-97.1302,48.4632],[-97.1286,48.4587],[-97.1308,48.4517],[-97.1504,48.441],[-97.1431,48.438],[-97.1329,48.4436],[-97.1263,48.4428],[-97.1233,48.4371],[-97.1264,48.4315],[-97.14,48.4336],[-97.1458,48.4313],[-97.1411,48.4267],[-97.1254,48.4225],[-97.1224,48.4173],[-97.1269,48.4164],[-97.1382,48.4216],[-97.1525,48.4187],[-97.1553,48.416],[-97.1525,48.4128],[-97.1392,48.4179],[-97.1312,48.4066],[-97.147,48.3967],[-97.1633,48.3931],[-97.1568,48.3908],[-97.1574,48.3859],[-97.1511,48.3823],[-97.1336,48.3824],[-97.141,48.379],[-97.1386,48.3707],[-97.1535,48.3706],[-97.1559,48.3648],[-97.1438,48.3543],[-97.1365,48.3524],[-97.1406,48.3449],[-97.1257,48.3401],[-97.129,48.3328],[-97.1397,48.3301],[-97.1418,48.3258],[-97.1272,48.3278],[-97.1157,48.3234],[-97.133,48.319],[-97.1376,48.3094],[-97.1244,48.3112],[-97.1222,48.3084],[-97.1264,48.3055],[-97.1258,48.3028],[-97.1122,48.2962],[-97.1185,48.2939],[-97.1271,48.2988],[-97.1367,48.2919],[-97.1384,48.2891],[-97.1361,48.2869],[-97.1239,48.2911],[-97.1166,48.2797],[-97.1251,48.2766],[-97.1254,48.2701],[-97.145,48.2688],[-97.1435,48.2655],[-97.1232,48.2619],[-97.1306,48.259],[-97.1252,48.2532],[-97.1269,48.2494],[-97.135,48.2496],[-97.1466,48.2446],[-97.1454,48.2412],[-97.1338,48.2393],[-97.1429,48.2361],[-97.1441,48.2323],[-97.1207,48.2254],[-97.1249,48.2232],[-97.1391,48.2266],[-97.1491,48.2233],[-97.1518,48.2188],[-97.1378,48.2215],[-97.1222,48.2159],[-97.1177,48.2104],[-97.1223,48.2071],[-97.1312,48.2169],[-97.1394,48.2163],[-97.1388,48.2132],[-97.1289,48.2088],[-97.141,48.2042],[-97.1359,48.1965],[-97.1484,48.1872],[-97.1498,48.1831],[-97.1385,48.1824],[-97.136,48.1779],[-97.1478,48.1715],[-97.1419,48.1602],[-97.1261,48.1628],[-97.1211,48.1592],[-97.1403,48.1509],[-97.1464,48.1419],[-97.1376,48.1432],[-97.1228,48.1397],[-97.1243,48.1362],[-97.1335,48.1369],[-97.1209,48.1153],[-97.1241,48.1077],[-97.1114,48.1061],[-97.1087,48.1001],[-97.1027,48.0973],[-97.1025,48.0947],[-97.1101,48.0921],[-97.0998,48.0859],[-97.1008,48.0775],[-97.105,48.0731],[-97.0983,48.0714],[-97.0887,48.0593],[-97.0758,48.0527],[-97.072,48.047],[-97.0687,48.0277],[-97.0722,48.0191],[-97.0627,48.0145],[-97.0666,48.0107],[-97.0641,47.9982],[-97.0531,47.9903],[-97.0592,47.9754],[-97.0572,47.9705],[-97.0618,47.9647],[-97.053,47.9587],[-97.0554,47.9476],[-97.0473,47.9417],[-97.036,47.9393],[-97.0362,47.9305],[-97.0177,47.9197],[-97.0238,47.9157],[-97.0169,47.9127],[-97.0152,47.9067],[-97.0253,47.9076],[-97.0199,47.9014],[-97.0251,47.8954],[-97.0188,47.8905],[-97.0254,47.8846],[-97.0179,47.8785],[-97.0232,47.874],[-97.0061,47.8703],[-97.0027,47.8663],[-97.006,47.8647],[-96.9977,47.8582],[-96.9973,47.8489],[-96.9938,47.8458],[-96.9984,47.8421],[-96.9924,47.8427],[-96.9936,47.8381],[-96.9859,47.8368],[-96.9815,47.8294],[-96.9868,47.8253],[-96.9744,47.8241],[-96.9804,47.8216],[-96.9788,47.8098],[-96.9916,47.8085],[-96.9726,47.8031],[-96.9763,47.8016],[-96.9765,47.7979],[-96.9663,47.7993],[-96.9571,47.791],[-96.9653,47.7839],[-96.958,47.7856],[-96.9593,47.7807],[-96.9525,47.7797],[-96.9561,47.775],[-96.9473,47.7752],[-96.9349,47.7674],[-96.9384,47.7611],[-96.9289,47.7551],[-96.9397,47.7548],[-96.9293,47.7505],[-96.9286,47.7437],[-96.9327,47.7372],[-96.9241,47.7263],[-96.9184,47.7239],[-96.9311,47.7159],[-96.9201,47.7172],[-96.92,47.7104],[-96.9119,47.7068],[-96.9205,47.6995],[-96.9123,47.7017],[-96.9069,47.6941],[-96.9096,47.6892],[-96.8994,47.6899],[-96.8963,47.6741],[-96.8852,47.674],[-96.8898,47.6693],[-96.8855,47.6643],[-96.8868,47.6531],[-96.8822,47.6492],[-96.8824,47.6426],[-96.8883,47.6388],[-96.8805,47.6291],[-96.8746,47.6282],[-96.8805,47.6259],[-96.8759,47.623],[-96.8797,47.6193],[-96.871,47.6181],[-96.8738,47.6137],[-96.8571,47.6107],[-96.8549,47.6073],[-96.8568,47.6018],[-96.851,47.5985],[-96.8589,47.5958],[-96.8499,47.5906],[-96.8536,47.5791],[-96.8604,47.5752],[-96.8515,47.5688],[-96.869,47.5677],[-96.8635,47.5626],[-96.8476,47.5663],[-96.8542,47.5603],[-96.8618,47.5596],[-96.8499,47.5533],[-96.8602,47.5458],[-96.8478,47.5421],[-96.8458,47.5381],[-96.8561,47.5422],[-96.8621,47.5413],[-96.8624,47.5381],[-96.8535,47.5364],[-96.8605,47.5296],[-96.8712,47.5275],[-96.8668,47.5253],[-96.8616,47.5157],[-96.8428,47.5163],[-96.8437,47.5127],[-96.8535,47.5115],[-96.8423,47.5088],[-96.8529,47.5073],[-96.8535,47.5016],[-96.8489,47.4979],[-96.8651,47.4916],[-96.8522,47.4859],[-96.8555,47.4832],[-96.8629,47.484],[-96.8685,47.4784],[-96.8649,47.477],[-96.8585,47.4811],[-96.852,47.479],[-96.8611,47.4728],[-96.8539,47.4604],[-96.8636,47.457],[-96.8543,47.4545],[-96.8593,47.4517],[-96.8559,47.4392],[-96.8629,47.4364],[-96.8547,47.4316],[-96.8647,47.4281],[-96.8549,47.4247],[-96.8718,47.419],[-96.861,47.4177],[-96.8617,47.4145],[-96.8568,47.4097],[-96.8421,47.4117],[-96.8527,47.4061],[-96.8391,47.3994],[-96.8489,47.3936],[-96.8405,47.3932],[-96.8375,47.3895],[-96.8422,47.3862],[-96.8381,47.3833],[-96.8392,47.3812],[-96.85,47.3816],[-96.8437,47.3758],[-96.8546,47.3738],[-96.8473,47.3703],[-96.8398,47.3735],[-96.8371,47.3713],[-96.844,47.368],[-96.8528,47.3697],[-96.8582,47.3675],[-96.8484,47.3646],[-96.8523,47.3595],[-96.8505,47.3571],[-96.838,47.3558],[-96.8381,47.3535],[-96.8446,47.3543],[-96.8429,47.3508],[-96.8471,47.3477],[-96.8404,47.3409],[-96.8306,47.3388],[-96.8345,47.3327],[-96.844,47.3317],[-96.8458,47.328],[-96.8408,47.3267],[-96.8346,47.331],[-96.8288,47.328],[-96.8369,47.3248],[-96.8355,47.3191],[-96.8469,47.3163],[-96.8423,47.3134],[-96.843,47.3088],[-96.8365,47.3115],[-96.8313,47.3068],[-96.8438,47.2931],[-96.8401,47.2756],[-96.8477,47.2711],[-96.8346,47.2672],[-96.8474,47.2626],[-96.836,47.2625],[-96.837,47.2586],[-96.8453,47.2585],[-96.8385,47.2563],[-96.8444,47.2511],[-96.8412,47.2495],[-96.8373,47.253],[-96.8322,47.2474],[-96.8437,47.2396],[-96.8365,47.2424],[-96.8287,47.2333],[-96.831,47.2313],[-96.8366,47.235],[-96.8415,47.2332],[-96.8414,47.2295],[-96.8315,47.2267],[-96.8442,47.2224],[-96.8456,47.2193],[-96.8419,47.2178],[-96.8391,47.2227],[-96.834,47.2219],[-96.8332,47.2193],[-96.8372,47.2159],[-96.8303,47.2103],[-96.8371,47.2072],[-96.8272,47.2012],[-96.8338,47.2036],[-96.8448,47.1936],[-96.8402,47.191],[-96.838,47.1965],[-96.8264,47.1915],[-96.8267,47.1888],[-96.8355,47.1863],[-96.8346,47.1837],[-96.8216,47.1843],[-96.8275,47.182],[-96.825,47.1779],[-96.8335,47.1766],[-96.8225,47.1731],[-96.8251,47.1673],[-96.8193,47.1638],[-96.832,47.1594],[-96.8224,47.1563],[-96.8362,47.1566],[-96.8363,47.1533],[-96.8412,47.1519],[-96.8286,47.1464],[-96.8346,47.1439],[-96.8264,47.1349],[-96.8305,47.1293],[-96.8217,47.1309],[-96.8258,47.1232],[-96.8375,47.1224],[-96.8234,47.1177],[-96.8207,47.115],[-96.822,47.1089],[-96.818,47.1086],[-96.8171,47.1037],[-96.821,47.1005],[-96.8171,47.0981],[-96.8172,47.0924],[-96.8273,47.0892],[-96.8159,47.0882],[-96.8206,47.0831],[-96.8159,47.0791],[-96.8293,47.0743],[-96.8196,47.0753],[-96.8244,47.0717],[-96.8197,47.0617],[-96.8303,47.0606],[-96.8218,47.0593],[-96.8249,47.0557],[-96.8176,47.0522],[-96.8275,47.0464],[-96.8176,47.0471],[-96.8226,47.0369],[-96.8124,47.0387],[-96.8169,47.0335],[-96.8272,47.0317],[-96.8196,47.0298],[-96.8149,47.024],[-96.8288,47.022],[-96.8348,47.0176],[-96.8322,47.0153],[-96.8334,47.0102],[-96.8393,47.007],[-96.829,47.0053],[-96.8275,47.0018],[-96.821,47.0033],[-96.8233,47.0003],[-96.8192,46.9976],[-96.8241,46.9971],[-96.8223,46.9906],[-96.8263,46.9881],[-96.8201,46.9798],[-96.8228,46.9703],[-96.8103,46.9639],[-96.8063,46.9677],[-96.8024,46.9642],[-96.8012,46.9684],[-96.7953,46.9659],[-96.804,46.9576],[-96.7988,46.9515],[-96.804,46.9469],[-96.7985,46.9442],[-96.7915,46.9455],[-96.7912,46.9276],[-96.7863,46.9301],[-96.785,46.9243],[-96.7796,46.9281],[-96.7769,46.9257],[-96.7747,46.9306],[-96.7625,46.9348],[-96.7563,46.9287],[-96.764,46.9292],[-96.7651,46.9269],[-96.7528,46.924],[-96.7629,46.9234],[-96.7545,46.9145],[-96.7597,46.9166],[-96.7638,46.9128],[-96.7652,46.9053],[-96.7714,46.9063],[-96.7736,46.9036],[-96.7704,46.9004],[-96.7763,46.8969],[-96.7694,46.8929],[-96.7745,46.8887],[-96.773,46.8845],[-96.7674,46.8843],[-96.7689,46.8785],[-96.7716,46.8778],[-96.7722,46.8814],[-96.7812,46.8796],[-96.7759,46.8743],[-96.7819,46.8713],[-96.7804,46.8679],[-96.784,46.862],[-96.776,46.8545],[-96.7855,46.8538],[-96.7828,46.8512],[-96.7734,46.8515],[-96.7817,46.846],[-96.7748,46.8393],[-96.7869,46.8411],[-96.7829,46.8365],[-96.7844,46.8335],[-96.794,46.8333],[-96.7803,46.8252],[-96.7922,46.8274],[-96.7924,46.8232],[-96.7996,46.8207],[-96.8027,46.8118],[-96.7957,46.8074],[-96.8031,46.8053],[-96.7956,46.8015],[-96.8018,46.7967],[-96.7948,46.7957],[-96.796,46.7896],[-96.7895,46.7895],[-96.7871,46.7855],[-96.7971,46.7765],[-96.7839,46.7782],[-96.7846,46.7741],[-96.7899,46.7746],[-96.7889,46.7708],[-96.7754,46.7666],[-96.7892,46.7656],[-96.7778,46.7617],[-96.7863,46.7617],[-96.7827,46.7567],[-96.7897,46.7567],[-96.7827,46.7541],[-96.7893,46.752],[-96.7832,46.7509],[-96.7876,46.7483],[-96.7804,46.7456],[-96.7874,46.7432],[-96.7804,46.7418],[-96.783,46.7404],[-96.7809,46.7337],[-96.7845,46.7319],[-96.7791,46.7268],[-96.7819,46.7253],[-96.7807,46.7222],[-96.7912,46.7185],[-96.7821,46.717],[-96.7875,46.7137],[-96.7836,46.7115],[-96.7894,46.7095],[-96.7839,46.7059],[-96.7912,46.7035],[-96.7841,46.7014],[-96.788,46.7006],[-96.7858,46.6917],[-96.7906,46.6894],[-96.7854,46.6878],[-96.786,46.6848],[-96.7883,46.6816],[-96.7947,46.6833],[-96.7877,46.6767],[-96.7989,46.6785],[-96.7984,46.6737],[-96.7914,46.6724],[-96.7951,46.6674],[-96.8021,46.6678],[-96.7955,46.6664],[-96.8001,46.6611],[-96.7971,46.6596],[-96.7992,46.6543],[-96.7907,46.6491],[-96.7941,46.6464],[-96.7857,46.6406],[-96.7911,46.6385],[-96.7982,46.6296],[-96.7822,46.6314],[-96.7913,46.625],[-96.7783,46.6254],[-96.7863,46.6224],[-96.7873,46.6194],[-96.7836,46.6222],[-96.78,46.6195],[-96.7755,46.6212],[-96.775,46.6175],[-96.7812,46.6154],[-96.7708,46.6153],[-96.7746,46.612],[-96.7725,46.6093],[-96.7788,46.6075],[-96.7682,46.6063],[-96.7722,46.6038],[-96.7716,46.5962],[-96.7671,46.5989],[-96.763,46.5941],[-96.756,46.5954],[-96.7562,46.5923],[-96.7622,46.592],[-96.7626,46.5893],[-96.7525,46.5883],[-96.7508,46.5852],[-96.7609,46.5818],[-96.7504,46.5838],[-96.7473,46.582],[-96.7575,46.5778],[-96.7558,46.5743],[-96.7466,46.5755],[-96.7528,46.5714],[-96.7455,46.5709],[-96.7474,46.5675],[-96.7417,46.564],[-96.752,46.5626],[-96.7468,46.5588],[-96.7544,46.5568],[-96.746,46.5561],[-96.7492,46.5496],[-96.7452,46.5506],[-96.7406,46.5468],[-96.7449,46.5482],[-96.7505,46.5441],[-96.7387,46.5432],[-96.7501,46.5408],[-96.7383,46.5393],[-96.7427,46.5381],[-96.738,46.5346],[-96.7462,46.5349],[-96.742,46.5292],[-96.7453,46.525],[-96.7367,46.5241],[-96.7452,46.5202],[-96.74,46.52],[-96.7342,46.5121],[-96.7404,46.5111],[-96.7344,46.507],[-96.7335,46.5035],[-96.736,46.5051],[-96.7424,46.4999],[-96.737,46.5012],[-96.7386,46.498],[-96.7334,46.497],[-96.7332,46.4927],[-96.737,46.4916],[-96.7342,46.4886],[-96.7397,46.4867],[-96.7325,46.4829],[-96.7389,46.4787],[-96.736,46.4775],[-96.7334,46.4804],[-96.7236,46.4709],[-96.7146,46.4723],[-96.7231,46.4667],[-96.7132,46.4665],[-96.7187,46.4619],[-96.7116,46.4598],[-96.7122,46.4554],[-96.7183,46.4536],[-96.7131,46.4502],[-96.7218,46.4488],[-96.7123,46.4413],[-96.7219,46.4398],[-96.7179,46.4394],[-96.7154,46.434],[-96.7157,46.4373],[-96.7032,46.4373],[-96.7077,46.4298],[-96.7012,46.4302],[-96.7047,46.4264],[-96.6989,46.4264],[-96.7046,46.418],[-96.6933,46.4221],[-96.6922,46.4161],[-96.7015,46.4151],[-96.6972,46.4126],[-96.6854,46.4142],[-96.6891,46.4068],[-96.6805,46.4071],[-96.6725,46.3952],[-96.6751,46.391],[-96.6678,46.3902],[-96.671,46.3895],[-96.6682,46.3876],[-96.6671,46.3756],[-96.6578,46.3744],[-96.6604,46.3716],[-96.655,46.3659],[-96.6432,46.3619],[-96.6484,46.3581],[-96.6452,46.3507],[-96.6294,46.3543],[-96.6278,46.3494],[-96.6167,46.3474],[-96.6202,46.3402],[-96.5994,46.33],[-96.6061,46.3266],[-96.6,46.3268],[-96.6012,46.3194],[-96.5968,46.3171],[-96.6036,46.3025],[-96.5973,46.2976],[-96.6057,46.2937],[-96.5964,46.2912],[-96.5964,46.288],[-96.6018,46.286],[-96.5948,46.286],[-96.6003,46.2811],[-96.5951,46.2742],[-96.6004,46.2618],[-96.5929,46.2573],[-96.5954,46.2534],[-96.5923,46.2503],[-96.5837,46.2498],[-96.5987,46.2423],[-96.5958,46.2198],[-96.5917,46.2181],[-96.5928,46.2139],[-96.5884,46.2129],[-96.5911,46.2087],[-96.5856,46.2092],[-96.5889,46.2045],[-96.5843,46.2041],[-96.5873,46.2016],[-96.5837,46.2012],[-96.5846,46.1975],[-96.5912,46.1957],[-96.5851,46.1945],[-96.5905,46.1905],[-96.5873,46.1883],[-96.5892,46.1814],[-96.5874,46.178],[-96.5767,46.1744],[-96.5762,46.1599],[-96.5803,46.1511],[-96.5687,46.1332],[-96.5671,46.12],[-96.5602,46.1164],[-96.5632,46.1087],[-96.5579,46.1025],[-96.5573,46.0877],[-96.5544,46.0841],[-96.5591,46.0585],[-96.5662,46.0517],[-96.5779,46.0272],[-96.5741,46.0163],[-96.5757,46.0077],[-96.5708,45.9641],[-96.5653,45.9573],[-96.562,45.9352],[-98.3113,45.9361],[-100.4306,45.9436],[-104.0456,45.9453]]];
+  function inRing(ring, la, lo) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      if ((yi > la) !== (yj > la) && lo < (xj - xi) * (la - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+  const inNorthDakota = (la, lo) => ND_RINGS.some((r) => inRing(r, la, lo));
+
+  function locate() {
+    if (!navigator.geolocation) { $("#ex-locmsg").textContent = "This browser can't share its location."; return; }
+    $("#ex-locmsg").textContent = "Finding you…";
+    navigator.geolocation.getCurrentPosition((pos) => {
+      here = { la: pos.coords.latitude, lo: pos.coords.longitude };
+      const inMN = inNorthDakota(here.la, here.lo);
+      $("#ex-locmsg").textContent = inMN ? "Sorted by distance from you. Your location stays in this browser." : "You're outside North Dakota: distances are from where you are. Your location stays in this browser.";
+      st.sort = GUIDES[st.g].sorts.includes("nearest") ? "nearest" : st.sort;
+      if (view === "map" && inMN) centerOn(here);
+      shown = 100; render();
+    }, (err) => {
+      $("#ex-locmsg").textContent = err && err.code === 1 ? "Location is off for this site. Allow it in your browser settings to sort by distance."
+        : "Couldn't get a location fix just now. Tap Near me to try again.";
+    },
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 });   // a fresh fix on every tap, never one from minutes ago
+  }
+
+  function setView(v) {
+    view = v;
+    document.querySelectorAll(".ex-view button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    $("#ex-listwrap").hidden = v !== "list";
+    $("#ex-mapwrap").hidden = v !== "map";
+    render();
+    // the map often starts below the fold (on phones, and on laptop-height screens): bring it into view
+    if (v === "map" && $("#ex-mapwrap").getBoundingClientRect().top > innerHeight * 0.5) $("#ex-mapwrap").scrollIntoView({ block: "nearest" });
+  }
+
+  // the URL moved under us: Back/Forward (popstate) or a link to another #hash (hashchange). Both can fire for one step.
+  function fromURL() {
+    const before = listHash();
+    readHash();
+    if (listHash() !== before) { syncInputs(); shown = 100; render(); }
+    if (st.p && !idsReady) { loadIds().then(fromURL); return; }
+    const p = st.p && P.find((x) => x.id === st.p);
+    const panel = $("#ex-panel");
+    if (p) {
+      if (panel.hidden || panel.dataset.id !== p.id) {
+        openPlace(p, false);
+        // Forward to a place opened earlier: its entry was pushed after the list's, so closing it steps back, as after a tap
+        if (history.state && history.state.ndeats === "place") { listAtPush = listHash(); panel.dataset.pushed = "1"; }
+      }
+    }
+    else { if (!panel.hidden) closePlace(true); linkMissing(); }
+  }
+
+  // a #p= link whose place isn't here: ids.json didn't load, or the place has left the list since the link was made
+  function linkMissing() {
+    if (!st.p) return;
+    $("#ex-locmsg").textContent = idsFailed ? "The place in this link couldn't load: you may be offline, or the site was just updated. Reload the page to try again."
+      : "The place in this link isn't on the list anymore (it may have closed or moved).";
+  }
+
+  function controls() {
+    document.querySelectorAll(".ex-guides button").forEach((b) => b.onclick = () => { if (guideOk(b.dataset.g)) st.g = b.dataset.g; st.sort = ""; shown = 100; render(); });
+    let t = null;
+    $("#ex-q").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { st.q = e.target.value; shown = 100; render(); }, 120); });
+    $("#ex-sort").onchange = (e) => { st.sort = e.target.value; if (st.sort === "nearest" && !here) locate(); shown = 100; render(); };
+    $("#ex-town").onchange = (e) => { st.town = e.target.value; shown = 100; render(); };
+    $("#ex-cuisine").onchange = (e) => { st.cuisine = e.target.value; shown = 100; render(); };
+    $("#ex-chains").onchange = (e) => { st.chains = e.target.checked; shown = 100; render(); };
+    $("#ex-bib").onchange = (e) => { st.bib = e.target.checked; shown = 100; render(); };
+    $("#ex-clear").onclick = () => { st.town = st.cuisine = ""; st.chains = st.bib = false; syncInputs(); shown = 100; render(); };
+    $("#ex-locate").onclick = locate;
+    $("#ex-more").onclick = () => { shown += 200; renderList(order()); };
+    document.querySelectorAll(".ex-view button").forEach((b) => b.onclick = () => setView(b.dataset.v));
+    $("#ex-list").addEventListener("click", (e) => { const b = e.target.closest(".ex-row"); if (b && P[+b.dataset.i]) openPlace(P[+b.dataset.i]); });
+    // warm the region file of the row under the pointer (or keyboard focus), so the panel opens with its details
+    for (const ev of ["pointerover", "focusin"]) $("#ex-list").addEventListener(ev, (e) => { const b = e.target.closest && e.target.closest(".ex-row"); if (b && P[+b.dataset.i]) { loadIds(); loadDetail(P[+b.dataset.i].co); } });
+    // the ids (a few hundred KB) wait for the first sign of use, so a visit that only looks doesn't download them
+    const WARM = ["pointerdown", "keydown", "wheel", "scroll", "touchstart"];
+    const warmIds = () => { WARM.forEach((ev) => removeEventListener(ev, warmIds, true)); loadIds(); };
+    WARM.forEach((ev) => addEventListener(ev, warmIds, { capture: true, passive: true }));
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#ex-panel").hidden) closePlace(); });
+    window.addEventListener("popstate", fromURL);
+    window.addEventListener("hashchange", fromURL);
+    $("#ex-backdrop").addEventListener("click", () => { if (st.p || !$("#ex-panel").hidden) closePlace(); });
+    mapEvents();
+  }
+  function syncInputs() {
+    $("#ex-q").value = st.q; $("#ex-town").value = st.town; $("#ex-cuisine").value = st.cuisine; $("#ex-chains").checked = st.chains; $("#ex-bib").checked = st.bib;
+  }
+
+  (async () => {
+    $("#ex-loading").hidden = false;   // hidden in the HTML, so a browser without JavaScript shows only the <noscript> note
+    readHash();
+    try { await load(); } catch (e) { $("#ex-loading").textContent = "The restaurant list couldn't load. Refresh to try again."; return; }
+    syncInputs(); controls();
+    $("#ex-app").hidden = false;
+    $("#ex-loading").hidden = true;
+    render();
+    if (st.p) {
+      await loadIds();
+      const open = P.find((p) => p.id === st.p);
+      if (open) { await loadDetail(open.co); openPlace(open, false); }
+      else linkMissing();
+    }
+  })();
+})();

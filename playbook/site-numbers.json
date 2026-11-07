@@ -1,0 +1,278 @@
+{
+ "generated": "2026-11-06",
+ "domain": "https://nickstrom5.github.io/north-dakota-eats",
+ "restaurants": 1736,
+ "places_incl_hidden": 1837,
+ "towns": 248,
+ "counties": 53,
+ "on_an_official_list": 0,
+ "hand_checked_on_a_guide": 11,
+ "serves_alcohol_state_license": 0,
+ "guide_knoephla": 6,
+ "guide_steaks": 5,
+ "oldest": 0,
+ "honors": 1,
+ "michelin": {},
+ "james_beard": 1,
+ "americas_classics": 0,
+ "permits_updated": "",
+ "city_pages": {
+  "Fargo": {
+   "restaurants": 342,
+   "listed": 3,
+   "knoephla": 2,
+   "steaks": 0,
+   "hon": 1,
+   "oldest": 0
+  },
+  "Grand Forks": {
+   "restaurants": 141,
+   "listed": 3,
+   "knoephla": 1,
+   "steaks": 2,
+   "hon": 0,
+   "oldest": 0
+  }
+ },
+ "cities_without_a_page": {
+  "Bismarck": 0,
+  "Minot": 1,
+  "West Fargo": 1,
+  "Williston": 0,
+  "Dickinson": 0,
+  "Mandan": 1,
+  "Jamestown": 0,
+  "Wahpeton": 0,
+  "Devils Lake": 1,
+  "Valley City": 0,
+  "Medora": 2,
+  "Watford City": 0
+ },
+ "noindex_pages": [],
+ "web_app_data_bytes": {
+  "data/core.json": {
+   "raw": 132495,
+   "gzip": 33594
+  },
+  "data/detail-adams-county.json": {
+   "raw": 214,
+   "gzip": 152
+  },
+  "data/detail-barnes-county.json": {
+   "raw": 1454,
+   "gzip": 514
+  },
+  "data/detail-benson-county.json": {
+   "raw": 340,
+   "gzip": 187
+  },
+  "data/detail-billings-county.json": {
+   "raw": 625,
+   "gzip": 323
+  },
+  "data/detail-bottineau-county.json": {
+   "raw": 939,
+   "gzip": 361
+  },
+  "data/detail-bowman-county.json": {
+   "raw": 338,
+   "gzip": 177
+  },
+  "data/detail-burke-county.json": {
+   "raw": 312,
+   "gzip": 176
+  },
+  "data/detail-burleigh-county.json": {
+   "raw": 12097,
+   "gzip": 3307
+  },
+  "data/detail-cass-county.json": {
+   "raw": 26936,
+   "gzip": 7087
+  },
+  "data/detail-cavalier-county.json": {
+   "raw": 428,
+   "gzip": 217
+  },
+  "data/detail-dickey-county.json": {
+   "raw": 568,
+   "gzip": 258
+  },
+  "data/detail-divide-county.json": {
+   "raw": 204,
+   "gzip": 139
+  },
+  "data/detail-dunn-county.json": {
+   "raw": 395,
+   "gzip": 209
+  },
+  "data/detail-eddy-county.json": {
+   "raw": 243,
+   "gzip": 165
+  },
+  "data/detail-emmons-county.json": {
+   "raw": 282,
+   "gzip": 178
+  },
+  "data/detail-foster-county.json": {
+   "raw": 376,
+   "gzip": 214
+  },
+  "data/detail-golden-valley-county.json": {
+   "raw": 79,
+   "gzip": 94
+  },
+  "data/detail-grand-forks-county.json": {
+   "raw": 10151,
+   "gzip": 2747
+  },
+  "data/detail-grant-county.json": {
+   "raw": 161,
+   "gzip": 98
+  },
+  "data/detail-griggs-county.json": {
+   "raw": 238,
+   "gzip": 160
+  },
+  "data/detail-hettinger-county.json": {
+   "raw": 232,
+   "gzip": 148
+  },
+  "data/detail-kidder-county.json": {
+   "raw": 630,
+   "gzip": 255
+  },
+  "data/detail-lamoure-county.json": {
+   "raw": 379,
+   "gzip": 174
+  },
+  "data/detail-logan-county.json": {
+   "raw": 190,
+   "gzip": 147
+  },
+  "data/detail-mchenry-county.json": {
+   "raw": 403,
+   "gzip": 176
+  },
+  "data/detail-mcintosh-county.json": {
+   "raw": 105,
+   "gzip": 88
+  },
+  "data/detail-mckenzie-county.json": {
+   "raw": 1710,
+   "gzip": 625
+  },
+  "data/detail-mclean-county.json": {
+   "raw": 543,
+   "gzip": 259
+  },
+  "data/detail-mercer-county.json": {
+   "raw": 698,
+   "gzip": 306
+  },
+  "data/detail-morton-county.json": {
+   "raw": 3311,
+   "gzip": 1114
+  },
+  "data/detail-mountrail-county.json": {
+   "raw": 1608,
+   "gzip": 538
+  },
+  "data/detail-nelson-county.json": {
+   "raw": 431,
+   "gzip": 217
+  },
+  "data/detail-oliver-county.json": {
+   "raw": 50,
+   "gzip": 67
+  },
+  "data/detail-pembina-county.json": {
+   "raw": 577,
+   "gzip": 266
+  },
+  "data/detail-pierce-county.json": {
+   "raw": 537,
+   "gzip": 252
+  },
+  "data/detail-ramsey-county.json": {
+   "raw": 2121,
+   "gzip": 736
+  },
+  "data/detail-ransom-county.json": {
+   "raw": 483,
+   "gzip": 251
+  },
+  "data/detail-renville-county.json": {
+   "raw": 238,
+   "gzip": 150
+  },
+  "data/detail-richland-county.json": {
+   "raw": 1851,
+   "gzip": 652
+  },
+  "data/detail-rolette-county.json": {
+   "raw": 742,
+   "gzip": 290
+  },
+  "data/detail-sargent-county.json": {
+   "raw": 209,
+   "gzip": 145
+  },
+  "data/detail-sheridan-county.json": {
+   "raw": 79,
+   "gzip": 76
+  },
+  "data/detail-sioux-county.json": {
+   "raw": 137,
+   "gzip": 95
+  },
+  "data/detail-slope-county.json": {
+   "raw": 50,
+   "gzip": 69
+  },
+  "data/detail-stark-county.json": {
+   "raw": 4364,
+   "gzip": 1306
+  },
+  "data/detail-steele-county.json": {
+   "raw": 105,
+   "gzip": 90
+  },
+  "data/detail-stutsman-county.json": {
+   "raw": 2757,
+   "gzip": 886
+  },
+  "data/detail-towner-county.json": {
+   "raw": 137,
+   "gzip": 95
+  },
+  "data/detail-traill-county.json": {
+   "raw": 631,
+   "gzip": 274
+  },
+  "data/detail-walsh-county.json": {
+   "raw": 912,
+   "gzip": 370
+  },
+  "data/detail-ward-county.json": {
+   "raw": 9631,
+   "gzip": 2724
+  },
+  "data/detail-wells-county.json": {
+   "raw": 423,
+   "gzip": 219
+  },
+  "data/detail-williams-county.json": {
+   "raw": 5584,
+   "gzip": 1618
+  },
+  "data/ids.json": {
+   "raw": 22596,
+   "gzip": 13315
+  },
+  "data/nd_shapes.json": {
+   "raw": 46786,
+   "gzip": 9670
+  }
+ }
+}
